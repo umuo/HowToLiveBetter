@@ -1,0 +1,78 @@
+# 自动同步使用 GITHUB_TOKEN，不触发 push；同步成功后通过 workflow_run 部署最新 main。
+name: GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: [Sync upstream]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Build HTML
+        run: node tools/offline/build.mjs dist/pages/index.html
+
+      - name: Prepare site URL and preview image
+        env:
+          PAGE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync, copyFileSync } from 'node:fs';
+          import { SITE } from './tools/lib/book.mjs';
+          const site = process.env.PAGE_URL;
+          if (!site) throw new Error('GitHub Pages URL is missing');
+          const url = site.replace(/\/$/, '') + '/';
+          const path = 'dist/pages/index.html';
+          const html = readFileSync(path, 'utf8')
+            .replaceAll(SITE, url)
+            .replace('离线副本，生成于', '页面构建于');
+          writeFileSync(path, html);
+          copyFileSync('og.png', 'dist/pages/og.png');
+          NODE
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
